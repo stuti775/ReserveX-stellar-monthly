@@ -329,20 +329,23 @@ mod test {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol, token};
 
-    fn setup() -> (Env, BookingReservationContractClient, Address, token::StellarAssetClient, Address) {
-        let env = Env::default();
+    fn setup<'a>(env: &'a Env) -> (BookingReservationContractClient<'a>, Address, token::StellarAssetClient<'a>, Address) {
         env.mock_all_auths();
+        // Ignore deprecation warnings for test brevity
+        #[allow(deprecated)]
         let contract_id = env.register_contract(None, BookingReservationContract);
-        let client = BookingReservationContractClient::new(&env, &contract_id);
-        let token_admin = Address::generate(&env);
+        let client = BookingReservationContractClient::new(env, &contract_id);
+        let token_admin = Address::generate(env);
+        #[allow(deprecated)]
         let token_id = env.register_stellar_asset_contract(token_admin.clone());
-        let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
-        (env, client, contract_id, token_admin_client, token_id)
+        let token_admin_client = token::StellarAssetClient::new(env, &token_id);
+        (client, contract_id, token_admin_client, token_id)
     }
 
     #[test]
     fn test_1_create_slot_success() {
-        let (env, client, _, _, _) = setup();
+        let env = Env::default();
+        let (client, _, _, _) = setup(&env);
         let provider = Address::generate(&env);
         let slot_id = Symbol::new(&env, "consult1");
 
@@ -365,7 +368,8 @@ mod test {
 
     #[test]
     fn test_2_book_slot_transfers_escrow() {
-        let (env, client, contract_id, token_admin, token_id) = setup();
+        let env = Env::default();
+        let (client, contract_id, token_admin, token_id) = setup(&env);
         let provider = Address::generate(&env);
         let customer = Address::generate(&env);
         let slot_id = Symbol::new(&env, "consult2");
@@ -395,7 +399,8 @@ mod test {
 
     #[test]
     fn test_3_cancel_booking_refunds_customer() {
-        let (env, client, contract_id, token_admin, token_id) = setup();
+        let env = Env::default();
+        let (client, contract_id, token_admin, token_id) = setup(&env);
         let provider = Address::generate(&env);
         let customer = Address::generate(&env);
         let slot_id = Symbol::new(&env, "consult3");
