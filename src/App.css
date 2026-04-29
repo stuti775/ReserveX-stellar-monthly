@@ -88,6 +88,16 @@ body {
     top: 0;
     height: 100vh;
     z-index: 10;
+    overflow-y: auto;
+}
+
+/* Hide scrollbar for clean aesthetic */
+.sidebar::-webkit-scrollbar {
+    display: none;
+}
+.sidebar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
 }
 
 .sidebar-header {

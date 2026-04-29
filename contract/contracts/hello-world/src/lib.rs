@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env, String,
-    Symbol, Vec,
+    Symbol, Vec, token,
 };
 
 // ── Storage TTL Constants ────────────────────────────────────────────────────
@@ -95,15 +95,6 @@ impl BookingReservationContract {
 
     // ── Write Methods ─────────────────────────────────────────────────────────
 
-    /// Create a new bookable service slot.
-    ///
-    /// * `id`           — Unique Symbol identifier (≤ 32 chars).
-    /// * `provider`     — Address of the service provider; must sign.
-    /// * `service_name` — Non-empty display name.
-    /// * `date`         — Unix timestamp for the calendar date.
-    /// * `start_time`   — Unix timestamp for slot start (must be < `end_time`).
-    /// * `end_time`     — Unix timestamp for slot end.
-    /// * `price`        — Price in stroops; must be ≥ 0.
     pub fn create_slot(
         env: Env,
         id: Symbol,
@@ -133,8 +124,6 @@ impl BookingReservationContract {
 
         let slot = Slot {
             provider: provider.clone(),
-            // customer is initially unset — use a sentinel value of provider
-            // so the field is always a valid Address; it gets overwritten on booking.
             customer: provider,
             is_booked: false,
             service_name,
@@ -163,11 +152,8 @@ impl BookingReservationContract {
         Self::bump_instance(&env);
     }
 
-    /// Book an available slot for a customer.
-    ///
-    /// * `id`       — Symbol ID of the slot to book.
-    /// * `customer` — Address of the customer; must sign.
-    pub fn book_slot(env: Env, id: Symbol, customer: Address) {
+    /// Book an available slot for a customer. Escrows the tokens into the contract.
+    pub fn book_slot(env: Env, id: Symbol, customer: Address, token: Address) {
         customer.require_auth();
 
         let key = Self::slot_key(&id);
@@ -177,6 +163,12 @@ impl BookingReservationContract {
             Some(mut slot) => {
                 if slot.is_booked {
                     panic_with_error!(&env, SlotError::AlreadyBooked);
+                }
+
+                // Transfer payment to contract escrow
+                if slot.price > 0 {
+                    let client = token::Client::new(&env, &token);
+                    client.transfer(&customer, &env.current_contract_address(), &slot.price);
                 }
 
                 slot.customer = customer;
@@ -190,11 +182,8 @@ impl BookingReservationContract {
         }
     }
 
-    /// Cancel an active booking. Only the provider or customer may cancel.
-    ///
-    /// * `id`     — Symbol ID of the slot.
-    /// * `caller` — Address of the cancelling party; must sign.
-    pub fn cancel_booking(env: Env, id: Symbol, caller: Address) {
+    /// Cancel an active booking. Refunds the escrowed tokens to the customer.
+    pub fn cancel_booking(env: Env, id: Symbol, caller: Address, token: Address) {
         caller.require_auth();
 
         let key = Self::slot_key(&id);
@@ -209,6 +198,12 @@ impl BookingReservationContract {
                     panic_with_error!(&env, SlotError::Unauthorized);
                 }
 
+                // Refund payment back to the customer
+                if slot.price > 0 {
+                    let client = token::Client::new(&env, &token);
+                    client.transfer(&env.current_contract_address(), &slot.customer, &slot.price);
+                }
+
                 slot.is_booked = false;
                 slot.status = Symbol::new(&env, "cancelled");
 
@@ -219,11 +214,8 @@ impl BookingReservationContract {
         }
     }
 
-    /// Mark a booked slot as completed. Only the provider may call this.
-    ///
-    /// * `id`       — Symbol ID of the slot.
-    /// * `provider` — Provider address; must sign and must match slot owner.
-    pub fn complete_booking(env: Env, id: Symbol, provider: Address) {
+    /// Mark a booked slot as completed. Releases the escrowed tokens to the provider.
+    pub fn complete_booking(env: Env, id: Symbol, provider: Address, token: Address) {
         provider.require_auth();
 
         let key = Self::slot_key(&id);
@@ -238,6 +230,12 @@ impl BookingReservationContract {
                     panic_with_error!(&env, SlotError::NotBooked);
                 }
 
+                // Release payment to the provider
+                if slot.price > 0 {
+                    let client = token::Client::new(&env, &token);
+                    client.transfer(&env.current_contract_address(), &slot.provider, &slot.price);
+                }
+
                 slot.status = Symbol::new(&env, "completed");
 
                 env.storage().instance().set(&key, &slot);
@@ -247,12 +245,6 @@ impl BookingReservationContract {
         }
     }
 
-    /// Update the price of an available (unbooked) slot.
-    /// Only the provider who owns the slot may call this.
-    ///
-    /// * `id`       — Symbol ID of the slot.
-    /// * `provider` — Must be the original slot creator; must sign.
-    /// * `new_price` — New price in stroops; must be ≥ 0.
     pub fn update_price(env: Env, id: Symbol, provider: Address, new_price: i128) {
         provider.require_auth();
 
@@ -280,11 +272,6 @@ impl BookingReservationContract {
         }
     }
 
-    /// Permanently delete a slot. Only available (unbooked) slots may be deleted.
-    /// Only the provider may delete their own slot.
-    ///
-    /// * `id`       — Symbol ID of the slot to remove.
-    /// * `provider` — Must be the slot owner; must sign.
     pub fn delete_slot(env: Env, id: Symbol, provider: Address) {
         provider.require_auth();
 
@@ -302,7 +289,6 @@ impl BookingReservationContract {
 
                 env.storage().instance().remove(&key);
 
-                // Remove from ID list
                 let ids = Self::load_ids(&env);
                 let mut new_ids: Vec<Symbol> = Vec::new(&env);
                 for stored_id in ids.iter() {
@@ -319,19 +305,16 @@ impl BookingReservationContract {
 
     // ── Read Methods ──────────────────────────────────────────────────────────
 
-    /// Fetch a single slot by its Symbol ID. Returns `None` if not found.
     pub fn get_slot(env: Env, id: Symbol) -> Option<Slot> {
         Self::bump_instance(&env);
         env.storage().instance().get(&Self::slot_key(&id))
     }
 
-    /// Return the ordered list of all slot Symbol IDs.
     pub fn list_slots(env: Env) -> Vec<Symbol> {
         Self::bump_instance(&env);
         Self::load_ids(&env)
     }
 
-    /// Return the total number of slots ever created (never decrements on delete).
     pub fn get_slot_count(env: Env) -> u32 {
         Self::bump_instance(&env);
         env.storage()
