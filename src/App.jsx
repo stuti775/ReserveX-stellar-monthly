@@ -1,316 +1,571 @@
-import React, { useState, useRef, useCallback } from "react";
-import { checkConnection, createSlot, bookSlot, cancelBooking, completeBooking, getSlot, listSlots, getSlotCount } from "../lib.js/stellar.js";
+import React, { useState, useRef, useCallback, useEffect } from "react";
+import "./App.css";
+import {
+    checkConnection, connectWallet,
+    createSlot, bookSlot, cancelBooking, completeBooking,
+    updatePrice, deleteSlot,
+    getSlot, listSlots, getSlotCount,
+    datetimeToTs, tsToDisplay, stroopsToXlm,
+} from "../lib/stellar.js";
 
-const nowTs = () => Math.floor(Date.now() / 1000);
-
-const initialForm = () => ({
-    id: "slot1",
-    provider: "",
-    customer: "",
-    serviceName: "Consultation",
-    date: String(nowTs()),
-    startTime: String(nowTs()),
-    endTime: String(nowTs() + 3600),
-    price: "1000",
-});
-
-const toOutput = (value) => {
-    if (typeof value === "string") return value;
-    return JSON.stringify(value, null, 2);
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const nowDt = (offsetSeconds = 0) => {
+    const d = new Date(Date.now() + offsetSeconds * 1000);
+    return d.toISOString().slice(0, 16);
 };
 
-const truncateAddress = (addr) => {
-    if (!addr || addr.length < 12) return addr;
-    return addr.slice(0, 8) + "..." + addr.slice(-4);
+const truncate = (addr) =>
+    addr && addr.length > 12 ? addr.slice(0, 6) + "…" + addr.slice(-4) : addr;
+
+const STATUS_META = {
+    available: { label: "Available", cls: "badge-available" },
+    booked:    { label: "Booked",    cls: "badge-booked"    },
+    cancelled: { label: "Cancelled", cls: "badge-cancelled" },
+    completed: { label: "Completed", cls: "badge-completed" },
 };
 
+// ── Toast ─────────────────────────────────────────────────────────────────────
+function Toast({ toasts, dismiss }) {
+    return (
+        <div className="toast-stack">
+            {toasts.map(t => (
+                <div key={t.id} className={`toast toast-${t.type}`}>
+                    <span className="toast-icon">{t.type === "success" ? "✓" : t.type === "error" ? "✕" : "⋯"}</span>
+                    <span className="toast-msg">{t.message}</span>
+                    <button className="toast-close" onClick={() => dismiss(t.id)}>×</button>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+// ── Slot Card ─────────────────────────────────────────────────────────────────
+function SlotCard({ slot, slotId }) {
+    const meta = STATUS_META[slot?.status] || STATUS_META.available;
+    return (
+        <div className="slot-card">
+            <div className="slot-card-header">
+                <span className="slot-id">#{String(slotId)}</span>
+                <span className={`badge ${meta.cls}`}>{meta.label}</span>
+            </div>
+            <h3 className="slot-service">{String(slot.service_name || "—")}</h3>
+            <dl className="slot-meta">
+                <div className="slot-meta-row">
+                    <dt>Date</dt>
+                    <dd>{tsToDisplay(slot.date)}</dd>
+                </div>
+                <div className="slot-meta-row">
+                    <dt>Start</dt>
+                    <dd>{tsToDisplay(slot.start_time)}</dd>
+                </div>
+                <div className="slot-meta-row">
+                    <dt>End</dt>
+                    <dd>{tsToDisplay(slot.end_time)}</dd>
+                </div>
+                <div className="slot-meta-row">
+                    <dt>Price</dt>
+                    <dd className="slot-price">{stroopsToXlm(slot.price)}</dd>
+                </div>
+                <div className="slot-meta-row">
+                    <dt>Provider</dt>
+                    <dd className="addr">{truncate(String(slot.provider))}</dd>
+                </div>
+                {slot.is_booked && (
+                    <div className="slot-meta-row">
+                        <dt>Customer</dt>
+                        <dd className="addr">{truncate(String(slot.customer))}</dd>
+                    </div>
+                )}
+            </dl>
+        </div>
+    );
+}
+
+// ── Field ─────────────────────────────────────────────────────────────────────
+function Field({ label, hint, children }) {
+    return (
+        <div className="field">
+            <label className="field-label">{label}</label>
+            {children}
+            {hint && <span className="field-hint">{hint}</span>}
+        </div>
+    );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-    const [form, setForm] = useState(initialForm);
-    const [output, setOutput] = useState("Ready.");
-    const [walletState, setWalletState] = useState("Wallet: not connected");
     const [walletKey, setWalletKey] = useState("");
+    const [activeTab, setActiveTab] = useState("create");
     const [isBusy, setIsBusy] = useState(false);
     const [busyAction, setBusyAction] = useState("");
-    const [countValue, setCountValue] = useState("-");
-    const [status, setStatus] = useState("idle");
-    const [activeTab, setActiveTab] = useState("create");
-    const [confirmAction, setConfirmAction] = useState(null);
+    const [toasts, setToasts] = useState([]);
+    const [slotCount, setSlotCount] = useState("—");
+    const [slotIds, setSlotIds] = useState([]);
+    const [viewedSlot, setViewedSlot] = useState(null);
+    const [viewedSlotId, setViewedSlotId] = useState("");
+    const [confirmCancel, setConfirmCancel] = useState(false);
     const confirmTimer = useRef(null);
+    const toastId = useRef(0);
 
-    const setField = (event) => {
-        const { name, value } = event.target;
-        setForm((prev) => ({ ...prev, [name]: value }));
-    };
+    // Forms
+    const [createForm, setCreateForm] = useState({
+        id: "slot1", serviceName: "Consultation",
+        date: nowDt(), startTime: nowDt(3600), endTime: nowDt(7200),
+        price: "10000000",
+    });
+    const [bookForm, setBookForm]     = useState({ id: "slot1" });
+    const [actionForm, setActionForm] = useState({ id: "slot1", newPrice: "10000000" });
+    const [queryId, setQueryId]       = useState("slot1");
 
-    const runAction = async (action, actionName) => {
+    // ── Toast helpers ─────────────────────────────────────────────────────────
+    const addToast = useCallback((message, type = "info") => {
+        const id = ++toastId.current;
+        setToasts(prev => [...prev, { id, message, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000);
+    }, []);
+
+    const dismissToast = useCallback((id) =>
+        setToasts(prev => prev.filter(t => t.id !== id)), []);
+
+    // ── Run action wrapper ────────────────────────────────────────────────────
+    const run = useCallback(async (fn, actionKey, successMsg) => {
         setIsBusy(true);
-        setBusyAction(actionName || "");
+        setBusyAction(actionKey);
         try {
-            const result = await action();
-            setOutput(toOutput(result ?? "No data found"));
-            setStatus("success");
-        } catch (error) {
-            setOutput(error?.message || String(error));
-            setStatus("error");
+            const result = await fn();
+            if (successMsg) addToast(successMsg, "success");
+            return result;
+        } catch (err) {
+            addToast(err?.message || String(err), "error");
+            return null;
         } finally {
             setIsBusy(false);
             setBusyAction("");
         }
+    }, [addToast]);
+
+    const isLoading = (key) => isBusy && busyAction === key;
+
+    // ── Wallet ────────────────────────────────────────────────────────────────
+    const onConnect = async () => {
+        const result = await run(async () => {
+            const user = await connectWallet();
+            if (!user?.publicKey) throw new Error("Could not get wallet address.");
+            setWalletKey(user.publicKey);
+            setCreateForm(f => ({ ...f }));
+            return user.publicKey;
+        }, "connect", null);
+        if (result) addToast(`Connected: ${truncate(result)}`, "success");
     };
 
-    const onConnect = () => runAction(async () => {
-        const user = await checkConnection();
-        const next = user ? `Wallet: ${user.publicKey}` : "Wallet: not connected";
-        setWalletState(next);
-        if (user) {
-            setWalletKey(user.publicKey);
-            setForm(prev => ({ ...prev, provider: user.publicKey, customer: user.publicKey }));
-        }
-        return next;
-    }, "connect");
+    // Auto-detect on mount
+    useEffect(() => {
+        checkConnection().then(user => {
+            if (user?.publicKey) setWalletKey(user.publicKey);
+        });
+    }, []);
 
-    const onCreateSlot = () => runAction(async () => createSlot({
-        id: form.id.trim(),
-        provider: form.provider.trim(),
-        serviceName: form.serviceName.trim(),
-        date: Number(form.date || nowTs()),
-        startTime: Number(form.startTime || nowTs()),
-        endTime: Number(form.endTime || nowTs() + 3600),
-        price: form.price.trim(),
-    }), "createSlot");
+    // ── Create Slot ───────────────────────────────────────────────────────────
+    const onCreateSlot = () => run(async () => {
+        const provider = walletKey || createForm.provider;
+        if (!provider) throw new Error("Connect your wallet first.");
+        await createSlot({
+            id: createForm.id.trim(),
+            provider,
+            serviceName: createForm.serviceName.trim(),
+            date:      datetimeToTs(createForm.date),
+            startTime: datetimeToTs(createForm.startTime),
+            endTime:   datetimeToTs(createForm.endTime),
+            price:     Number(createForm.price),
+        });
+        await refreshCount();
+    }, "createSlot", `Slot "${createForm.id}" created successfully.`);
 
-    const onBookSlot = () => runAction(async () => bookSlot({
-        id: form.id.trim(),
-        customer: form.customer.trim(),
-    }), "bookSlot");
+    // ── Book Slot ─────────────────────────────────────────────────────────────
+    const onBookSlot = () => run(async () => {
+        const customer = walletKey;
+        if (!customer) throw new Error("Connect your wallet first.");
+        await bookSlot({ id: bookForm.id.trim(), customer });
+    }, "bookSlot", `Slot "${bookForm.id}" booked.`);
 
-    const handleCancelBooking = useCallback(() => {
-        if (confirmAction === "cancel") {
+    // ── Cancel Booking ────────────────────────────────────────────────────────
+    const onCancelBooking = useCallback(() => {
+        if (confirmCancel) {
             clearTimeout(confirmTimer.current);
-            setConfirmAction(null);
-            runAction(async () => cancelBooking({
-                id: form.id.trim(),
-                caller: form.customer.trim() || form.provider.trim(),
-            }), "cancelBooking");
+            setConfirmCancel(false);
+            run(async () => {
+                const caller = walletKey;
+                if (!caller) throw new Error("Connect your wallet first.");
+                await cancelBooking({ id: actionForm.id.trim(), caller });
+            }, "cancelBooking", `Booking for "${actionForm.id}" cancelled.`);
         } else {
-            setConfirmAction("cancel");
-            confirmTimer.current = setTimeout(() => setConfirmAction(null), 3000);
+            setConfirmCancel(true);
+            confirmTimer.current = setTimeout(() => setConfirmCancel(false), 4000);
         }
-    }, [confirmAction, form.id, form.customer, form.provider]);
+    }, [confirmCancel, actionForm.id, walletKey, run]);
 
-    const onCompleteBooking = () => runAction(async () => completeBooking({
-        id: form.id.trim(),
-        provider: form.provider.trim(),
-    }), "completeBooking");
+    // ── Complete Booking ──────────────────────────────────────────────────────
+    const onComplete = () => run(async () => {
+        const provider = walletKey;
+        if (!provider) throw new Error("Connect your wallet first.");
+        await completeBooking({ id: actionForm.id.trim(), provider });
+    }, "completeBooking", `Booking "${actionForm.id}" marked complete.`);
 
-    const onGetSlot = () => runAction(async () => getSlot(form.id.trim()), "getSlot");
+    // ── Update Price ──────────────────────────────────────────────────────────
+    const onUpdatePrice = () => run(async () => {
+        const provider = walletKey;
+        if (!provider) throw new Error("Connect your wallet first.");
+        await updatePrice({ id: actionForm.id.trim(), provider, newPrice: Number(actionForm.newPrice) });
+    }, "updatePrice", `Price updated for "${actionForm.id}".`);
 
-    const onList = () => runAction(async () => listSlots(), "list");
+    // ── Delete Slot ───────────────────────────────────────────────────────────
+    const onDeleteSlot = () => run(async () => {
+        const provider = walletKey;
+        if (!provider) throw new Error("Connect your wallet first.");
+        await deleteSlot({ id: actionForm.id.trim(), provider });
+        await refreshCount();
+    }, "deleteSlot", `Slot "${actionForm.id}" deleted.`);
 
-    const onCount = () => runAction(async () => {
-        const value = await getSlotCount();
-        setCountValue(String(value));
-        return { count: value };
-    }, "count");
+    // ── Query ─────────────────────────────────────────────────────────────────
+    const onGetSlot = () => run(async () => {
+        const result = await getSlot(queryId.trim());
+        setViewedSlot(result || null);
+        setViewedSlotId(queryId.trim());
+        if (!result) addToast("Slot not found.", "error");
+    }, "getSlot", null);
+
+    const onListSlots = () => run(async () => {
+        const ids = await listSlots();
+        const arr = Array.isArray(ids) ? ids : [];
+        setSlotIds(arr);
+        setViewedSlot(null);
+        addToast(`Found ${arr.length} slot${arr.length !== 1 ? "s" : ""}.`, "success");
+    }, "listSlots", null);
+
+    const refreshCount = async () => {
+        const c = await getSlotCount().catch(() => null);
+        if (c !== null) setSlotCount(String(c));
+    };
+
+    const onGetCount = () => run(async () => {
+        const c = await getSlotCount();
+        setSlotCount(String(c));
+        addToast(`Total slots: ${c}`, "success");
+    }, "getCount", null);
+
+    // ── Field helpers ─────────────────────────────────────────────────────────
+    const setCreate = (e) => setCreateForm(p => ({ ...p, [e.target.name]: e.target.value }));
+    const setBook   = (e) => setBookForm(p => ({ ...p, [e.target.name]: e.target.value }));
+    const setAction = (e) => setActionForm(p => ({ ...p, [e.target.name]: e.target.value }));
 
     const isConnected = walletKey.length > 0;
 
-    const btnLoadingText = (actionName, label) => {
-        if (isBusy && busyAction === actionName) return "Processing...";
-        return label;
-    };
-
-    const btnCls = (actionName, base) => {
-        let cls = base;
-        if (isBusy && busyAction === actionName) cls += " btn-loading";
-        return cls;
-    };
-
-    const outputClass = () => {
-        if (status === "success") return "output-success";
-        if (status === "error") return "output-error";
-        return "output-idle";
-    };
+    const tabs = [
+        { id: "create",  label: "Create Slot",   icon: "+" },
+        { id: "book",    label: "Book / Manage",  icon: "◈" },
+        { id: "query",   label: "Query",          icon: "◉" },
+    ];
 
     return (
-        <main className="app">
-            {/* Calendar Hero */}
-            <div className="calendar-hero">
-                <div className="hero-top">
-                    <div className="hero-content">
-                        <p className="kicker">Stellar Soroban Project 4</p>
-                        <h1>Booking & Reservation</h1>
-                        <p className="subtitle">
-                            Create service time slots, book appointments, cancel or complete bookings on the Stellar blockchain.
-                        </p>
-                    </div>
-                    <div className="wallet-card">
-                        <button type="button" className={btnCls("connect", "connect-btn")} id="connectWallet" onClick={onConnect} disabled={isBusy}>
-                            {btnLoadingText("connect", "Connect Freighter")}
-                        </button>
-                        <span className="wallet-status" id="walletState">
-                            <span className={`status-dot ${isConnected ? "connected" : "disconnected"}`}></span>
-                            {isConnected ? `${truncateAddress(walletKey)} - Connected` : "Not Connected"}
-                        </span>
-                        <span className="slot-count">Slots: {countValue}</span>
+        <div className="app">
+            <Toast toasts={toasts} dismiss={dismissToast} />
+
+            {/* ── Header ── */}
+            <header className="site-header">
+                <div className="header-brand">
+                    <div className="brand-mark">RX</div>
+                    <div>
+                        <p className="brand-eyebrow">Stellar · Soroban · Testnet</p>
+                        <h1 className="brand-title">ReserveX</h1>
                     </div>
                 </div>
-            </div>
-
-            {/* Stats Bar */}
-            <div className="stats-bar">
-                <div className="stat-item">
-                    <div className="stat-label">Total Slots</div>
-                    <div className="stat-value">{countValue}</div>
-                </div>
-                <div className="stat-item">
-                    <div className="stat-label">Status</div>
-                    <div className="stat-value">{isBusy ? "..." : "Idle"}</div>
-                </div>
-                <div className="stat-item">
-                    <div className="stat-label">Network</div>
-                    <div className="stat-value">Stellar</div>
-                </div>
-            </div>
-
-            {/* Tab Navigation */}
-            <div className="tab-nav">
-                <button className={`tab-btn ${activeTab === "create" ? "active" : ""}`} onClick={() => setActiveTab("create")}>Create Slot</button>
-                <button className={`tab-btn ${activeTab === "booking" ? "active" : ""}`} onClick={() => setActiveTab("booking")}>Booking</button>
-                <button className={`tab-btn ${activeTab === "query" ? "active" : ""}`} onClick={() => setActiveTab("query")}>Query</button>
-            </div>
-
-            {/* Create Service Slot */}
-            {activeTab === "create" && (
-                <div className="section-card">
-                    <div className="section-header slot-header">
-                        <h2>Create Service Slot</h2>
+                <div className="header-right">
+                    <div className="stat-pill">
+                        <span className="stat-pill-label">Slots</span>
+                        <span className="stat-pill-value">{slotCount}</span>
                     </div>
-                    <div className="section-body">
-                        <div className="form-grid">
-                            <div className="cal-field">
-                                <label htmlFor="entryId">Slot ID (Symbol, &lt;= 32 chars)</label>
-                                <input id="entryId" name="id" value={form.id} onChange={setField} />
-                                <span className="helper">Unique identifier, max 32 characters</span>
-                            </div>
-                            <div className="cal-field">
-                                <label htmlFor="provider">Provider Address</label>
-                                <input id="provider" name="provider" value={form.provider} onChange={setField} placeholder="G..." />
-                                <span className="helper">Stellar public key starting with G...</span>
-                            </div>
-                            <div className="cal-field">
-                                <label htmlFor="serviceName">Service Name</label>
-                                <input id="serviceName" name="serviceName" value={form.serviceName} onChange={setField} />
-                            </div>
-                            <div className="cal-field">
-                                <label htmlFor="price">Price (i128 stroops)</label>
-                                <input id="price" name="price" value={form.price} onChange={setField} type="number" />
-                                <span className="helper">Amount in stroops (1 XLM = 10,000,000 stroops)</span>
-                            </div>
-                        </div>
-
-                        <div className="time-fields" style={{ marginTop: "1rem" }}>
-                            <div className="cal-field time-field">
-                                <label htmlFor="date">Date (u64 timestamp)</label>
-                                <input id="date" name="date" value={form.date} onChange={setField} type="number" />
-                                <span className="helper">Unix timestamp in seconds</span>
-                            </div>
-                            <div className="cal-field time-field">
-                                <label htmlFor="startTime">Start Time (u64)</label>
-                                <input id="startTime" name="startTime" value={form.startTime} onChange={setField} type="number" />
-                                <span className="helper">Unix timestamp in seconds</span>
-                            </div>
-                            <div className="cal-field time-field">
-                                <label htmlFor="endTime">End Time (u64)</label>
-                                <input id="endTime" name="endTime" value={form.endTime} onChange={setField} type="number" />
-                                <span className="helper">Unix timestamp in seconds</span>
-                            </div>
-                        </div>
-
-                        <div className="button-row">
-                            <button type="button" className={btnCls("createSlot", "btn-cal btn-cal-primary")} onClick={onCreateSlot} disabled={isBusy}>
-                                {btnLoadingText("createSlot", "Create Slot")}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Booking Management */}
-            {activeTab === "booking" && (
-                <div className="section-card">
-                    <div className="section-header booking-header">
-                        <h2>Booking Management</h2>
-                    </div>
-                    <div className="section-body">
-                        <div className="form-grid">
-                            <div className="cal-field full-span">
-                                <label htmlFor="customer">Customer Address</label>
-                                <input id="customer" name="customer" value={form.customer} onChange={setField} placeholder="G..." />
-                                <span className="helper">Stellar public key starting with G...</span>
-                            </div>
-                        </div>
-                        <div className="button-row">
-                            <button type="button" className={btnCls("bookSlot", "btn-cal btn-cal-success")} onClick={onBookSlot} disabled={isBusy}>
-                                {btnLoadingText("bookSlot", "Book Slot")}
-                            </button>
-                            <button
-                                type="button"
-                                className={`${btnCls("cancelBooking", "btn-cal btn-cal-danger")} ${confirmAction === "cancel" ? "btn-confirm" : ""}`}
-                                onClick={handleCancelBooking}
-                                disabled={isBusy}
-                            >
-                                {confirmAction === "cancel" ? "Confirm Cancel?" : btnLoadingText("cancelBooking", "Cancel Booking")}
-                            </button>
-                            <button type="button" className={btnCls("completeBooking", "btn-cal btn-cal-primary")} onClick={onCompleteBooking} disabled={isBusy}>
-                                {btnLoadingText("completeBooking", "Complete Booking")}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Query Actions */}
-            {activeTab === "query" && (
-                <div className="section-card">
-                    <div className="section-header results-header">
-                        <h2>Query Slots</h2>
-                    </div>
-                    <div className="section-body">
-                        <div className="button-row">
-                            <button type="button" className={btnCls("getSlot", "btn-cal btn-ghost-cal")} onClick={onGetSlot} disabled={isBusy}>
-                                {btnLoadingText("getSlot", "Get Slot")}
-                            </button>
-                            <button type="button" className={btnCls("list", "btn-cal btn-ghost-cal")} onClick={onList} disabled={isBusy}>
-                                {btnLoadingText("list", "List All Slots")}
-                            </button>
-                            <button type="button" className={btnCls("count", "btn-cal btn-ghost-cal")} onClick={onCount} disabled={isBusy}>
-                                {btnLoadingText("count", "Get Count")}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Results */}
-            <div className="section-card">
-                <div className="section-header results-header">
-                    <h2>Results</h2>
-                </div>
-                <div className="section-body" style={{ padding: 0 }}>
-                    <div className={`results-output ${outputClass()}`}>
-                        <div className="results-bar">Output Stream</div>
-                        {output === "Ready." ? (
-                            <div className="empty-state">
-                                <div className="empty-icon">&#9678;</div>
-                                <p>Connect your wallet and perform an action to see results here.</p>
-                            </div>
+                    <button
+                        id="connectWallet"
+                        className={`btn btn-connect ${isConnected ? "btn-connected" : ""}`}
+                        onClick={onConnect}
+                        disabled={isBusy && busyAction === "connect"}
+                    >
+                        {isLoading("connect") ? <span className="spinner" /> : null}
+                        {isConnected ? (
+                            <><span className="dot dot-green" />{truncate(walletKey)}</>
                         ) : (
-                            <pre id="output">{output}</pre>
+                            <><span className="dot dot-red" />Connect Freighter</>
                         )}
+                    </button>
+                </div>
+            </header>
+
+            {/* ── Hero Banner ── */}
+            <div className="hero-band">
+                <div className="hero-copy">
+                    <p className="hero-tag">Decentralised Booking</p>
+                    <p className="hero-desc">
+                        Create service slots, manage bookings and settlements — all enforced on-chain with Soroban smart contracts.
+                    </p>
+                </div>
+                <div className="hero-stats">
+                    <div className="hs-item">
+                        <span className="hs-num">{slotCount}</span>
+                        <span className="hs-label">Total Slots</span>
+                    </div>
+                    <div className="hs-divider" />
+                    <div className="hs-item">
+                        <span className={`hs-num hs-status ${isConnected ? "hs-green" : "hs-red"}`}>
+                            {isConnected ? "Live" : "Offline"}
+                        </span>
+                        <span className="hs-label">Wallet</span>
+                    </div>
+                    <div className="hs-divider" />
+                    <div className="hs-item">
+                        <span className="hs-num">Testnet</span>
+                        <span className="hs-label">Network</span>
                     </div>
                 </div>
             </div>
-        </main>
+
+            {/* ── Tab Nav ── */}
+            <nav className="tab-nav" role="tablist">
+                {tabs.map(t => (
+                    <button
+                        key={t.id}
+                        role="tab"
+                        aria-selected={activeTab === t.id}
+                        className={`tab-btn ${activeTab === t.id ? "tab-active" : ""}`}
+                        onClick={() => setActiveTab(t.id)}
+                    >
+                        <span className="tab-icon">{t.icon}</span>
+                        {t.label}
+                    </button>
+                ))}
+            </nav>
+
+            <main className="workspace">
+                {/* ── CREATE ── */}
+                {activeTab === "create" && (
+                    <section className="panel">
+                        <div className="panel-head">
+                            <div>
+                                <h2 className="panel-title">Create Service Slot</h2>
+                                <p className="panel-sub">Publish a new bookable time slot on-chain.</p>
+                            </div>
+                        </div>
+                        <div className="panel-body">
+                            <div className="form-grid-2">
+                                <Field label="Slot ID" hint="Unique symbol, max 32 chars, no spaces.">
+                                    <input className="input" name="id" value={createForm.id} onChange={setCreate} placeholder="e.g. slot1" />
+                                </Field>
+                                <Field label="Service Name">
+                                    <input className="input" name="serviceName" value={createForm.serviceName} onChange={setCreate} placeholder="e.g. Consultation" />
+                                </Field>
+                                <Field label="Price (stroops)" hint="1 XLM = 10,000,000 stroops">
+                                    <input className="input" name="price" type="number" value={createForm.price} onChange={setCreate} />
+                                </Field>
+                                <Field label="Date">
+                                    <input className="input" type="datetime-local" name="date" value={createForm.date} onChange={setCreate} />
+                                </Field>
+                                <Field label="Start Time">
+                                    <input className="input" type="datetime-local" name="startTime" value={createForm.startTime} onChange={setCreate} />
+                                </Field>
+                                <Field label="End Time">
+                                    <input className="input" type="datetime-local" name="endTime" value={createForm.endTime} onChange={setCreate} />
+                                </Field>
+                            </div>
+                            {!isConnected && (
+                                <div className="info-bar">Connect your Freighter wallet to sign this transaction.</div>
+                            )}
+                            <div className="action-row">
+                                <button
+                                    id="createSlotBtn"
+                                    className={`btn btn-primary ${isLoading("createSlot") ? "btn-busy" : ""}`}
+                                    onClick={onCreateSlot}
+                                    disabled={isBusy}
+                                >
+                                    {isLoading("createSlot") ? <><span className="spinner" /> Creating…</> : "Create Slot"}
+                                </button>
+                            </div>
+                        </div>
+                    </section>
+                )}
+
+                {/* ── BOOK / MANAGE ── */}
+                {activeTab === "book" && (
+                    <div className="col-layout">
+                        {/* Book */}
+                        <section className="panel">
+                            <div className="panel-head">
+                                <div>
+                                    <h2 className="panel-title">Book a Slot</h2>
+                                    <p className="panel-sub">Reserve an available slot as a customer.</p>
+                                </div>
+                            </div>
+                            <div className="panel-body">
+                                <Field label="Slot ID">
+                                    <input className="input" name="id" value={bookForm.id} onChange={setBook} placeholder="slot1" />
+                                </Field>
+                                <div className="action-row" style={{ marginTop: "1rem" }}>
+                                    <button
+                                        id="bookSlotBtn"
+                                        className={`btn btn-success ${isLoading("bookSlot") ? "btn-busy" : ""}`}
+                                        onClick={onBookSlot}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("bookSlot") ? <><span className="spinner" /> Booking…</> : "Book Slot"}
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+
+                        {/* Manage */}
+                        <section className="panel">
+                            <div className="panel-head">
+                                <div>
+                                    <h2 className="panel-title">Manage Slot</h2>
+                                    <p className="panel-sub">Cancel, complete, reprice, or delete a slot.</p>
+                                </div>
+                            </div>
+                            <div className="panel-body">
+                                <div className="form-grid-2">
+                                    <Field label="Slot ID" hint="The slot to act on.">
+                                        <input className="input" name="id" value={actionForm.id} onChange={setAction} placeholder="slot1" />
+                                    </Field>
+                                    <Field label="New Price (stroops)" hint="For Update Price only.">
+                                        <input className="input" name="newPrice" type="number" value={actionForm.newPrice} onChange={setAction} />
+                                    </Field>
+                                </div>
+                                <div className="action-row action-wrap">
+                                    <button
+                                        id="cancelBookingBtn"
+                                        className={`btn btn-danger ${isLoading("cancelBooking") ? "btn-busy" : ""} ${confirmCancel ? "btn-confirm" : ""}`}
+                                        onClick={onCancelBooking}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("cancelBooking")
+                                            ? <><span className="spinner" /> Cancelling…</>
+                                            : confirmCancel ? "⚠ Confirm Cancel?" : "Cancel Booking"}
+                                    </button>
+                                    <button
+                                        id="completeBookingBtn"
+                                        className={`btn btn-primary ${isLoading("completeBooking") ? "btn-busy" : ""}`}
+                                        onClick={onComplete}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("completeBooking") ? <><span className="spinner" /> Completing…</> : "Complete Booking"}
+                                    </button>
+                                    <button
+                                        id="updatePriceBtn"
+                                        className={`btn btn-outline ${isLoading("updatePrice") ? "btn-busy" : ""}`}
+                                        onClick={onUpdatePrice}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("updatePrice") ? <><span className="spinner" /> Updating…</> : "Update Price"}
+                                    </button>
+                                    <button
+                                        id="deleteSlotBtn"
+                                        className={`btn btn-ghost-danger ${isLoading("deleteSlot") ? "btn-busy" : ""}`}
+                                        onClick={onDeleteSlot}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("deleteSlot") ? <><span className="spinner" /> Deleting…</> : "Delete Slot"}
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+                    </div>
+                )}
+
+                {/* ── QUERY ── */}
+                {activeTab === "query" && (
+                    <section className="panel">
+                        <div className="panel-head">
+                            <div>
+                                <h2 className="panel-title">Query Blockchain State</h2>
+                                <p className="panel-sub">Read slot data directly from the Soroban contract.</p>
+                            </div>
+                        </div>
+                        <div className="panel-body">
+                            <div className="query-bar">
+                                <Field label="Slot ID">
+                                    <input
+                                        className="input"
+                                        value={queryId}
+                                        onChange={e => setQueryId(e.target.value)}
+                                        placeholder="slot1"
+                                    />
+                                </Field>
+                                <div className="query-btns">
+                                    <button
+                                        id="getSlotBtn"
+                                        className={`btn btn-primary ${isLoading("getSlot") ? "btn-busy" : ""}`}
+                                        onClick={onGetSlot}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("getSlot") ? <><span className="spinner" /> Fetching…</> : "Get Slot"}
+                                    </button>
+                                    <button
+                                        id="listSlotsBtn"
+                                        className={`btn btn-outline ${isLoading("listSlots") ? "btn-busy" : ""}`}
+                                        onClick={onListSlots}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("listSlots") ? <><span className="spinner" /> Loading…</> : "List All Slots"}
+                                    </button>
+                                    <button
+                                        id="getCountBtn"
+                                        className={`btn btn-outline ${isLoading("getCount") ? "btn-busy" : ""}`}
+                                        onClick={onGetCount}
+                                        disabled={isBusy}
+                                    >
+                                        {isLoading("getCount") ? <><span className="spinner" /> Loading…</> : "Get Count"}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Slot card result */}
+                            {viewedSlot && (
+                                <div className="result-section">
+                                    <p className="result-label">Slot Details</p>
+                                    <SlotCard slot={viewedSlot} slotId={viewedSlotId} />
+                                </div>
+                            )}
+
+                            {/* Slot ID list */}
+                            {slotIds.length > 0 && (
+                                <div className="result-section">
+                                    <p className="result-label">All Slot IDs ({slotIds.length})</p>
+                                    <div className="id-list">
+                                        {slotIds.map((id, i) => (
+                                            <button
+                                                key={i}
+                                                className="id-chip"
+                                                onClick={() => { setQueryId(String(id)); }}
+                                            >
+                                                {String(id)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {!viewedSlot && slotIds.length === 0 && (
+                                <div className="empty-state">
+                                    <div className="empty-icon">◎</div>
+                                    <p>Enter a Slot ID and hit <strong>Get Slot</strong>, or click <strong>List All Slots</strong> to explore.</p>
+                                </div>
+                            )}
+                        </div>
+                    </section>
+                )}
+            </main>
+
+            <footer className="site-footer">
+                <span>ReserveX — Stellar Soroban · Testnet</span>
+                <span>Built with Soroban SDK &amp; React</span>
+            </footer>
+        </div>
     );
 }
