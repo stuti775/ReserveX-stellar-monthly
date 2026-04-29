@@ -100,6 +100,7 @@ export default function App() {
     const [isBusy, setIsBusy] = useState(false);
     const [busyAction, setBusyAction] = useState("");
     const [toasts, setToasts] = useState([]);
+    const [txSuccess, setTxSuccess] = useState(null); // Modal state
     
     // Global State
     const [slotCount, setSlotCount] = useState("—");
@@ -144,7 +145,16 @@ export default function App() {
         setBusyAction(actionKey);
         try {
             const result = await fn();
-            if (successMsg) addToast(successMsg, "success");
+            // If result is a transaction hash string (64 hex chars), show the Modal instead of a Toast
+            if (successMsg && typeof result === 'string' && result.length === 64) {
+                setTxSuccess({
+                    message: successMsg,
+                    hash: result,
+                    link: `https://stellar.expert/explorer/testnet/tx/${result}`
+                });
+            } else if (successMsg) {
+                addToast(successMsg, "success");
+            }
             return result;
         } catch (err) {
             addToast(err?.message || String(err), "error");
@@ -315,6 +325,25 @@ export default function App() {
     return (
         <div className="app-layout">
             <Toast toasts={toasts} dismiss={dismissToast} />
+
+            {/* Transaction Modal */}
+            {txSuccess && (
+                <div className="modal-overlay">
+                    <div className="modal-content fade-in">
+                        <button className="modal-close" onClick={() => setTxSuccess(null)}>×</button>
+                        <div className="tx-icon">✅</div>
+                        <h3 className="tx-title">Transaction Successful</h3>
+                        <p className="tx-desc">{txSuccess.message}</p>
+                        <div className="tx-status-box">
+                            <span className="tx-status-label">Network Status</span>
+                            <span className="badge badge-completed">Confirmed</span>
+                        </div>
+                        <a href={txSuccess.link} target="_blank" rel="noopener noreferrer" className="btn btn-outline tx-btn">
+                            View on Stellar Expert ↗
+                        </a>
+                    </div>
+                </div>
+            )}
 
             {/* Sidebar Navigation */}
             <aside className="sidebar">

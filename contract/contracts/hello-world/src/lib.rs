@@ -323,3 +323,104 @@ impl BookingReservationContract {
             .unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol, token};
+
+    fn setup() -> (Env, BookingReservationContractClient, Address, token::StellarAssetClient, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, BookingReservationContract);
+        let client = BookingReservationContractClient::new(&env, &contract_id);
+        let token_admin = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract(token_admin.clone());
+        let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
+        (env, client, contract_id, token_admin_client, token_id)
+    }
+
+    #[test]
+    fn test_1_create_slot_success() {
+        let (env, client, _, _, _) = setup();
+        let provider = Address::generate(&env);
+        let slot_id = Symbol::new(&env, "consult1");
+
+        client.create_slot(
+            &slot_id,
+            &provider,
+            &String::from_str(&env, "Legal Consultation"),
+            &1700000000,
+            &1700000000,
+            &1700003600,
+            &50_000_000,
+        );
+
+        let slot = client.get_slot(&slot_id).unwrap();
+        assert_eq!(slot.service_name, String::from_str(&env, "Legal Consultation"));
+        assert_eq!(slot.status, Symbol::new(&env, "available"));
+        assert_eq!(slot.price, 50_000_000);
+        assert_eq!(client.get_slot_count(), 1);
+    }
+
+    #[test]
+    fn test_2_book_slot_transfers_escrow() {
+        let (env, client, contract_id, token_admin, token_id) = setup();
+        let provider = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let slot_id = Symbol::new(&env, "consult2");
+        
+        token_admin.mint(&customer, &200_000_000);
+
+        client.create_slot(
+            &slot_id,
+            &provider,
+            &String::from_str(&env, "Design Review"),
+            &1700000000,
+            &1700000000,
+            &1700003600,
+            &100_000_000,
+        );
+
+        client.book_slot(&slot_id, &customer, &token_id);
+
+        let token_client = token::Client::new(&env, &token_id);
+        assert_eq!(token_client.balance(&customer), 100_000_000);
+        assert_eq!(token_client.balance(&contract_id), 100_000_000);
+
+        let slot = client.get_slot(&slot_id).unwrap();
+        assert_eq!(slot.is_booked, true);
+        assert_eq!(slot.status, Symbol::new(&env, "booked"));
+    }
+
+    #[test]
+    fn test_3_cancel_booking_refunds_customer() {
+        let (env, client, contract_id, token_admin, token_id) = setup();
+        let provider = Address::generate(&env);
+        let customer = Address::generate(&env);
+        let slot_id = Symbol::new(&env, "consult3");
+        
+        token_admin.mint(&customer, &100_000_000);
+
+        client.create_slot(
+            &slot_id,
+            &provider,
+            &String::from_str(&env, "Quick Chat"),
+            &1700000000,
+            &1700000000,
+            &1700003600,
+            &50_000_000,
+        );
+
+        client.book_slot(&slot_id, &customer, &token_id);
+        client.cancel_booking(&slot_id, &customer, &token_id);
+
+        let token_client = token::Client::new(&env, &token_id);
+        assert_eq!(token_client.balance(&contract_id), 0);
+        assert_eq!(token_client.balance(&customer), 100_000_000);
+
+        let slot = client.get_slot(&slot_id).unwrap();
+        assert_eq!(slot.status, Symbol::new(&env, "cancelled"));
+        assert_eq!(slot.is_booked, false);
+    }
+}
