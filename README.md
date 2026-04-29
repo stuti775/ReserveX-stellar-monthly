@@ -15,7 +15,7 @@ In traditional service booking platforms (like Calendly, Upwork, or Airbnb), int
 ## 🔗 Quick Links
 
 - **Live DApp:** [ReserveX on Vercel](https://reserve-x-woad.vercel.app/)
-- **Demo Video:** [Watch the 1-minute full functionality demo](<!-- INSERT_YOUTUBE_LINK_HERE -->)
+- **Demo Video:** [Watch the 1-minute full functionality demo](https://youtu.be/19m54yecDf4)
 
 ---
 
@@ -46,17 +46,24 @@ The application was designed with a **"Premium Editorial White Mode"** design sy
 
 ## 🖼️ Application Gallery
 
-### 1. Application Dashboard & UI
-![ReserveX Dashboard](<!-- INSERT_DASHBOARD_SCREENSHOT_PATH_HERE -->)
-*The seamless, editorial-style sidebar navigation and Network Explorer.*
+### 1. Application Dashboards & Workflow
+*Explore the seamless, editorial-style sidebar navigation and complete lifecycle management workflow.*
 
-### 2. Transaction Success & Stellar Expert Link
-![Transaction Modal](<!-- INSERT_TRANSACTION_MODAL_SCREENSHOT_HERE -->)
-*The success modal showing confirmed network status and block explorer links.*
+![Network Explorer](pictures/2.png)
+![Publish Slot](pictures/3.png)
+![Reservations](pictures/4.png)
+![Management Dashboard](pictures/5.png)
+![Transaction Success Modal](pictures/6.png)
+
+### 2. Robust Error Handling 
+*The UI captures and presents all 9 explicit Soroban smart contract error states.*
+
+![Error Handling Example](pictures/7.png)
 
 ### 3. Smart Contract Test Output (3+ Passing Tests)
-![Soroban Test Output](<!-- INSERT_TEST_OUTPUT_SCREENSHOT_HERE -->)
 *Comprehensive testing for Slot Creation, Escrow Token Transfers, and Cancellation Refunds.*
+
+![Soroban Test Output](pictures/21.png)
 
 ---
 
@@ -65,9 +72,13 @@ The application was designed with a **"Premium Editorial White Mode"** design sy
 The Soroban smart contract is written in Rust and utilizes the `soroban_sdk::token::Client` to handle cross-contract calls to the Native Stellar Asset Contract. 
 
 - **Network:** Stellar Testnet
-- **ReserveX Contract ID:** `CBZTZ5S5UMZ4VFJOQRFSMTGP6FFABRURJFI3UT32DCR2OEHELOHED65W`
+- **ReserveX Contract ID:** `CDNVTLE2EBGAXHFFDDOJRT4RT7GDXI3G4ACWD3TYJ2KTTAOG7L2QTLOW`
 - **Native XLM Token Address:** `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`
-- **Example Transaction Hash:** `<!-- INSERT_EXAMPLE_TX_HASH_HERE -->`
+- **Example Transaction Links:**
+  - [Contract Interaction (Booking/Escrow)](https://stellar.expert/explorer/testnet/tx/9868048139821056#9868048139821057)
+  - [Operation Trace 1](https://stellar.expert/explorer/testnet/op/9868018075066369)
+  - [Operation Trace 2](https://stellar.expert/explorer/testnet/op/9867992305266689)
+  - [Operation Trace 3](https://stellar.expert/explorer/testnet/op/9867464024293377)
 
 ---
 
